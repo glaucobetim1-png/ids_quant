@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.5.3
+// @version      1.5.4
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -111,11 +111,12 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.5.3 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.5.4 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
-  // aviso rápido no canto da tela com o que o script entendeu da última bipada
+  // aviso rápido no canto da tela com o que o script entendeu da última bipada (AVULSO/CAIXA/soma)
+  const MOSTRAR_AVISO = false;   // false = não mostra o aviso no canto; o preenchimento continua igual
   const aviso = document.createElement("div");
   aviso.style.cssText = "position:fixed;top:6px;right:150px;z-index:2147483000;padding:4px 10px;" +
     "border-radius:6px;font:bold 13px Arial;color:#fff;pointer-events:none;display:none;" +
@@ -123,6 +124,7 @@
   document.body.appendChild(aviso);
   let tAviso = null;
   function mostrarAviso(texto, avulso) {
+    if (!MOSTRAR_AVISO) { aviso.style.display = "none"; return; }
     aviso.textContent = texto;
     aviso.style.background = avulso ? "#e67e00" : "#2e7d32";
     aviso.style.display = "block";
