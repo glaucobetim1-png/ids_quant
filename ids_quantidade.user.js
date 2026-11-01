@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.5.4
+// @version      1.5.5
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -111,7 +111,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.5.4 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.5.5 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -545,14 +545,36 @@
     }, INTERVALO_MS);
   }, true);
 
-  // ===== Janela "Histórico de Saídas de Insumos" (bloqueio de retirada antecipada) =====
-  const AUTO_FECHAR_HISTORICO = false;   // true = clica em "Sair" sozinho | false = só devolve o foco quando VOCÊ fechar
+  // ===== Janela "Histórico de Saídas de Insumos" =====
+  // Essa janela abre em dois momentos, com o MESMO título:
+  //   1) ao escolher o paciente (Usuário): vem com o campo Insumo VAZIO e lista tudo -> atrapalha, fecha sozinho.
+  //   2) depois de colocar o medicamento: vem com o campo Insumo PREENCHIDO (ex.: "1140 - DIPIRONA 500 MG")
+  //      e mostra só aquele item (previsão de retirada) -> ESSENCIAL, deixa aberta.
+  const FECHAR_HISTORICO_GERAL = true;   // true = fecha sozinho só a janela geral (Insumo vazio) | false = não fecha nenhuma
+  const AUTO_FECHAR_HISTORICO  = false;  // true = fecha QUALQUER histórico (inclusive a do item) | tem prioridade sobre a de cima
   const RE_JANELA_HIST = /Hist.rico de Sa.das de Insumos/i;
 
   function janelaHistorico() {
     return [...document.querySelectorAll(".x-window")].find(w =>
       w.offsetParent !== null &&
       RE_JANELA_HIST.test((w.querySelector(".x-window-header, .x-header, .x-title")?.textContent || "")));
+  }
+
+  // lê o valor do campo "Insumo:" DENTRO da janela de histórico (string vazia = janela geral)
+  function insumoDoHistorico(w) {
+    const rotulo = [...w.querySelectorAll("label")]
+      .find(l => /^Insumo:?$/i.test((l.textContent || "").trim().replace(/\s+/g, " ")));
+    if (!rotulo) return "";
+    const campo = document.getElementById(rotulo.getAttribute("for"));
+    return campo ? (campo.value || "").trim() : "";
+  }
+
+  function fecharHistorico(w) {
+    const btn = [...w.querySelectorAll(".x-btn")].find(b => /^\s*Sair\s*$/i.test(b.textContent));
+    if (!btn) return false;
+    const cmp = window.Ext && Ext.getCmp(btn.id);
+    if (cmp && cmp.fireHandler) cmp.fireHandler(); else btn.click();
+    return true;
   }
 
   function focarCodigo() {
@@ -562,24 +584,39 @@
 
   let histAberta = false;
   let histClicada = false;
+  let histVazioTicks = 0;   // quantas verificações seguidas a janela esteve com Insumo vazio (segurança)
 
   setInterval(() => {
     try {
       const w = janelaHistorico();
       if (w) {
         histAberta = true;
-        if (AUTO_FECHAR_HISTORICO && !histClicada) {
-          const btn = [...w.querySelectorAll(".x-btn")].find(b => /^\s*Sair\s*$/i.test(b.textContent));
-          if (btn) {
-            histClicada = true;
-            console.log("[IDS-qtd] janela de histórico detectada: clicando em Sair");
-            const cmp = window.Ext && Ext.getCmp(btn.id);
-            if (cmp && cmp.fireHandler) cmp.fireHandler(); else btn.click();
+        if (!histClicada) {
+          const insumo = insumoDoHistorico(w);
+          const vazio = insumo === "";
+          histVazioTicks = vazio ? histVazioTicks + 1 : 0;
+
+          // fecha QUALQUER histórico (modo antigo, desligado por padrão)
+          if (AUTO_FECHAR_HISTORICO) {
+            if (fecharHistorico(w)) {
+              histClicada = true;
+              console.log("[IDS-qtd] histórico: fechando (modo fechar tudo)");
+            }
+          // fecha só a geral: Insumo vazio por 2 verificações seguidas (~300ms), pra nunca fechar a do item
+          } else if (FECHAR_HISTORICO_GERAL && vazio && histVazioTicks >= 2) {
+            if (fecharHistorico(w)) {
+              histClicada = true;
+              console.log("[IDS-qtd] histórico GERAL (Insumo vazio): fechando em Sair");
+            }
+          } else if (!vazio) {
+            console.log("[IDS-qtd] histórico do item (Insumo:", insumo, "): deixando aberto");
+            histClicada = true;   // é a janela essencial: não mexe mais, só aguarda você fechar
           }
         }
       } else if (histAberta) {                       // a janela acabou de fechar
         histAberta = false;
         histClicada = false;
+        histVazioTicks = 0;
         console.log("[IDS-qtd] histórico fechado: voltando ao campo do código");
         setTimeout(focarCodigo, 80);
         setTimeout(focarCodigo, 300);                // reforço caso o IDS mexa no foco depois
