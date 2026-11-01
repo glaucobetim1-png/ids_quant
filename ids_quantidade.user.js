@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.6.1
+// @version      1.6.2
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -12,7 +12,7 @@
 (function () {
   // ===== Tabelas (C.B. -> quantidade) vêm do tabelas.json no GitHub =====
   // Para adicionar/alterar um C.B., edite só o tabelas.json: não precisa mexer neste script nem na versão.
-  const TABELAS_URL = "https://raw.githubusercontent.com/glaucobetim1-png/ids_quant/refs/heads/main/tabelas.json";
+  const TABELAS_URL = "https://raw.githubusercontent.com/glaucobetim1-png/ids_quantidade.user.js/main/tabelas.json";
   const TABELAS_RECARREGAR_MIN = 30;                 // releitura periódica com a página aberta (0 = só ao carregar)
   const TABELAS_CACHE_KEY = "ids-qtd-tabelas-v1";    // cópia local, usada se o GitHub estiver fora do ar
 
@@ -124,7 +124,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.6.0 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.6.1 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -371,6 +371,8 @@
   const FORCAR_PREVISAO = true;          // true = sempre põe hoje+N (sobrescreve) | false = só se estiver vazio
   const PREVISAO_DIAS_PADRAO = 15;
   const RE_PREVISAO = /^Previs.o:?$/i;   // campo "Previsão:" no formulário do item
+  const PREENCHER_SUFICIENCIA = true;    // também preenche o campo "Suficiência (Dias)" com o número de dias
+  const RE_SUFICIENCIA = /^Sufici.ncia(\s*\(.*\))?:?$/i;   // "Suficiência:" ou "Suficiência (Dias):"
 
   // código do insumo na tela: "861 - CLORIDRATO DE FLUOXETINA 20MG" -> "861"
   function codigoInsumoDaTela() {
@@ -412,6 +414,17 @@
       preencher(campo, alvo);
     }
     console.log("[IDS-qtd] Previsão preenchida:", alvo, "(", dias, "dias) | insumo", ins);
+
+    // Suficiência (Dias): preenche com o número de dias, pra aparecer a informação (o IDS deixa vazio sem Dose Diária)
+    if (PREENCHER_SUFICIENCIA) {
+      const campoSuf = campoPorRotulo(RE_SUFICIENCIA);
+      if (!campoSuf) {
+        console.warn("[IDS-qtd] Suficiência: campo não encontrado na tela (confira o rótulo do campo)");
+      } else if (String(campoSuf.value || "").trim() !== String(dias)) {
+        preencher(campoSuf, dias);
+        console.log("[IDS-qtd] Suficiência preenchida:", dias, "dias | insumo", ins);
+      }
+    }
   }
 
   function preencherDataReceita() {
