@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.5.7
+// @version      1.5.8
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -111,7 +111,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.5.7 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.5.8 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -597,6 +597,20 @@
   let histAberta = false;
   let histClicada = false;        // já decidimos o que fazer com a janela atual
   let histVazioDesde = 0;         // horário em que a janela começou a aparecer com Insumo vazio
+  let histPedidaManual = 0;       // horário do clique no botão "Histórico" (abre a consulta de propósito)
+
+  // Se VOCÊ clicar no botão "Histórico" da barra, a próxima janela é mantida aberta (consulta proposital).
+  const RE_BTN_HIST = /^\s*Hist.rico\s*$/i;
+  const JANELA_MANUAL_MS = 6000;  // por quanto tempo (ms) depois do clique a janela conta como "pedida por você"
+  document.addEventListener("click", (e) => {
+    try {
+      const btn = e.target.closest && e.target.closest(".x-btn, button, a");
+      if (btn && RE_BTN_HIST.test((btn.textContent || "").trim().replace(/\s+/g, " "))) {
+        histPedidaManual = Date.now();
+        console.log("[IDS-qtd] botão Histórico clicado: a próxima janela será mantida aberta");
+      }
+    } catch (e2) { /* ignora */ }
+  }, true);
 
   // decide o destino da janela de histórico: geral -> fecha (escondida); item -> mostra e deixa aberta
   function tratarJanelaHist(w) {
@@ -604,6 +618,15 @@
     histAberta = true;
     const insumo = insumoDoHistorico(w);
     const vazio = insumo === "";
+
+    // Você abriu pelo botão "Histórico": mantém aberta, mesmo sendo a geral (Insumo vazio).
+    if ((Date.now() - histPedidaManual) < JANELA_MANUAL_MS) {
+      w.style.removeProperty("visibility");
+      histClicada = true;
+      histPedidaManual = 0;   // consome: não vale para uma próxima janela
+      console.log("[IDS-qtd] histórico aberto pelo botão: mantendo aberto");
+      return;
+    }
 
     if (AUTO_FECHAR_HISTORICO) {
       if (fecharHistorico(w)) { histClicada = true; console.log("[IDS-qtd] histórico: fechando (modo fechar tudo)"); }
@@ -639,7 +662,9 @@
           let w = ehJanelaHist(n) ? n : (n.querySelector ? [...n.querySelectorAll(".x-window")].find(ehJanelaHist) : null);
           if (!w) continue;
           // esconde JÁ se o Insumo ainda estiver vazio, pra geral não chegar a aparecer
-          if (EVITAR_ABRIR_HISTORICO && FECHAR_HISTORICO_GERAL && !AUTO_FECHAR_HISTORICO && insumoDoHistorico(w) === "") {
+          // (mas NÃO esconde se você acabou de clicar no botão Histórico: aí é consulta proposital)
+          const pedidaManual = (Date.now() - histPedidaManual) < JANELA_MANUAL_MS;
+          if (!pedidaManual && EVITAR_ABRIR_HISTORICO && FECHAR_HISTORICO_GERAL && !AUTO_FECHAR_HISTORICO && insumoDoHistorico(w) === "") {
             w.style.setProperty("visibility", "hidden", "important");
           }
           tratarJanelaHist(w);
