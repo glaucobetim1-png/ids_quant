@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.6.2
+// @version      1.6.3
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -124,7 +124,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.6.1 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.6.2 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -371,7 +371,9 @@
   const FORCAR_PREVISAO = true;          // true = sempre põe hoje+N (sobrescreve) | false = só se estiver vazio
   const PREVISAO_DIAS_PADRAO = 15;
   const RE_PREVISAO = /^Previs.o:?$/i;   // campo "Previsão:" no formulário do item
-  const PREENCHER_SUFICIENCIA = true;    // também preenche o campo "Suficiência (Dias)" com o número de dias
+  // OBS: o IDS calcula a Suficiência sozinho pela Dose Diária e força 0 quando ela está vazia.
+  // Se o script escrever 15 aqui, o IDS zera na hora -> fica "piscando". Por isso vem DESLIGADO.
+  const PREENCHER_SUFICIENCIA = false;   // true tenta preencher a Suficiência (causa piscar; o IDS reseta pra 0)
   const RE_SUFICIENCIA = /^Sufici.ncia(\s*\(.*\))?:?$/i;   // "Suficiência:" ou "Suficiência (Dias):"
 
   // código do insumo na tela: "861 - CLORIDRATO DE FLUOXETINA 20MG" -> "861"
