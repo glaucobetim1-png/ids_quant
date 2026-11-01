@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.5.9
+// @version      1.6.0
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -20,16 +20,21 @@
   const AVULSO = {};   // etiqueta avulsa (envelope/cartela) quando NÃO for 1  (chave "avulso" do JSON)
   const CONTROLADOS = {};   // CÓDIGOS DE INSUMO controlados (o número antes do "-" no campo Insumo)  chave "controlados" do JSON
   let listaControladosDefinida = false;   // false = o JSON ainda não tem a chave "controlados"
+  const PREVISAO_DIAS = {}; // CÓDIGOS DE INSUMO -> dias p/ próxima retirada (xaropes/gotas etc.)  chave "previsao_dias" do JSON
+  let listaPrevisaoDefinida = false;      // false = o JSON ainda não tem a chave "previsao_dias"
   let tabelasOrigem = "nenhuma";
 
   function aplicarTabelas(d) {
     for (const k of Object.keys(TABELA)) delete TABELA[k];
     for (const k of Object.keys(AVULSO)) delete AVULSO[k];
     for (const k of Object.keys(CONTROLADOS)) delete CONTROLADOS[k];
+    for (const k of Object.keys(PREVISAO_DIAS)) delete PREVISAO_DIAS[k];
     Object.assign(TABELA, d.caixa);
     Object.assign(AVULSO, d.avulso);
     Object.assign(CONTROLADOS, d.controlados || {});
+    Object.assign(PREVISAO_DIAS, d.previsao || {});
     listaControladosDefinida = !!d.temLista;
+    listaPrevisaoDefinida = !!d.temPrevisao;
   }
 
   // confere o formato; devolve {caixa, avulso} limpo ou null se o conteúdo não servir
@@ -52,7 +57,14 @@
     const temLista = typeof obj.temLista === "boolean" ? obj.temLista     // cópia local já traz a resposta
                                                        : (!!ctrl && typeof ctrl === "object");
     const controlados = limpar(ctrl, "controlados");
-    return { caixa, avulso, controlados, temLista };
+    // previsao_dias: aceita [110, 1174] (todos 15 dias) ou {"110": 15, "373": 30}
+    // (do JSON vem como "previsao_dias"; da cópia local/cache vem já validado como "previsao")
+    let pv = obj.previsao_dias !== undefined ? obj.previsao_dias : obj.previsao;
+    if (Array.isArray(pv)) pv = Object.fromEntries(pv.map(c => [String(c).trim(), 15]));
+    const temPrevisao = typeof obj.temPrevisao === "boolean" ? obj.temPrevisao
+                                                             : (!!pv && typeof pv === "object");
+    const previsao = limpar(pv, "previsao_dias");       // dias positivos (ex.: 15)
+    return { caixa, avulso, controlados, temLista, previsao, temPrevisao };
   }
 
   // aceita comentários (// ...) e vírgula sobrando antes de } ou ]
@@ -87,7 +99,8 @@
       tabelasOrigem = "GitHub";
       console.log("[IDS-qtd] tabelas atualizadas do GitHub | caixa:", Object.keys(TABELA).length,
                   "| avulsos especiais:", Object.keys(AVULSO).length,
-                  "| controlados:", listaControladosDefinida ? Object.keys(CONTROLADOS).length : "sem lista (data para todos)");
+                  "| controlados:", listaControladosDefinida ? Object.keys(CONTROLADOS).length : "sem lista (data para todos)",
+                  "| previsão (xaropes/gotas):", listaPrevisaoDefinida ? Object.keys(PREVISAO_DIAS).length : "sem lista");
     } catch (e) {
       console.warn("[IDS-qtd] não consegui ler o tabelas.json (" + (e && e.message ? e.message : e) +
                    "). Mantendo as tabelas de:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length);
@@ -111,7 +124,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.5.9 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.6.0 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -352,6 +365,13 @@
   const RE_DATA_RECEITA = /^Data da Receita:$/;
   const RE_INSUMO = /^Insumo:$/;
 
+  // ===== Previsão de próxima retirada (xaropes, gotas etc.): preenche com HOJE + N dias =====
+  // Só para os insumos listados em "previsao_dias" no tabelas.json (padrão 15 dias).
+  const PREENCHER_PREVISAO = true;       // false desliga
+  const FORCAR_PREVISAO = true;          // true = sempre põe hoje+N (sobrescreve) | false = só se estiver vazio
+  const PREVISAO_DIAS_PADRAO = 15;
+  const RE_PREVISAO = /^Previs.o:?$/i;   // campo "Previsão:" no formulário do item
+
   // código do insumo na tela: "861 - CLORIDRATO DE FLUOXETINA 20MG" -> "861"
   function codigoInsumoDaTela() {
     const campo = campoPorRotulo(RE_INSUMO);
@@ -362,6 +382,36 @@
   function dataHojeBR() {
     const d = new Date();
     return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + "/" + d.getFullYear();
+  }
+
+  // data de hoje + N dias, no formato dd/mm/aaaa
+  function dataMaisDiasBR(dias) {
+    const d = new Date();
+    d.setDate(d.getDate() + (Number(dias) || 0));
+    return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + "/" + d.getFullYear();
+  }
+
+  // Preenche a Previsão com hoje + N dias, só para insumos listados em "previsao_dias" (xaropes/gotas).
+  function preencherPrevisao() {
+    if (!PREENCHER_PREVISAO || !listaPrevisaoDefinida) return;
+    const ins = codigoInsumoDaTela();
+    if (!ins || PREVISAO_DIAS[ins] === undefined) return;      // item não está na lista
+    const campo = campoPorRotulo(RE_PREVISAO);
+    if (!campo) { console.warn("[IDS-qtd] Previsão: campo não encontrado na tela (confira o rótulo do campo)"); return; }
+    const dias = PREVISAO_DIAS[ins] || PREVISAO_DIAS_PADRAO;
+    const alvo = dataMaisDiasBR(dias);
+    const atual = (campo.value || "").trim();
+    if (!FORCAR_PREVISAO && atual) return;                     // já tem data e não é pra sobrescrever
+    if (atual === alvo) return;                                // já está certo: não mexe
+    const cmp = window.Ext && Ext.getCmp(campo.dataset.componentid);
+    if (cmp && cmp.setValue) {
+      const d = new Date(); d.setDate(d.getDate() + dias);
+      cmp.setValue(cmp.format ? d : alvo);                     // datefield do Ext aceita Date; senão texto dd/mm/aaaa
+      if (cmp.checkChange) cmp.checkChange();
+    } else {
+      preencher(campo, alvo);
+    }
+    console.log("[IDS-qtd] Previsão preenchida:", alvo, "(", dias, "dias) | insumo", ins);
   }
 
   function preencherDataReceita() {
@@ -465,10 +515,12 @@
         const alvoDireto = antes.qtd + unid;
         preencher(qtdCampoDireto, alvoDireto);
         console.log("[IDS-qtd] soma direta (sem passar pelo IDS):", antes.qtd, "+", unid, "=", alvoDireto);
+        preencherPrevisao();                                   // xaropes/gotas: Previsão = hoje + N dias
         mostrarAviso((avulso ? "AVULSO" : "CAIXA") + ": +" + unid, avulso);
         setTimeout(() => {
           const q2 = campoPorRotulo(RE_QTD);
           if (q2 && lerQtd() !== alvoDireto) preencher(q2, alvoDireto);   // reaplica se foi sobrescrito
+          preencherPrevisao();                                 // reaplica se o IDS recalculou a previsão
           focarCodigo();
         }, CONFERE_MS);
         return;
@@ -531,11 +583,13 @@
 
         preencher(qtdCampo, alvo);
         console.log("[IDS-qtd] preenchido:", alvo);
+        preencherPrevisao();                                     // xaropes/gotas: Previsão = hoje + N dias
         mostrarAviso((avulso ? "AVULSO" : "CAIXA") + ": +" + unidade, avulso);
         setTimeout(() => mostrarCalculadora(unidade, avulso), CONFERE_MS + 60);   // calculadora (só abre na transferência)
         setTimeout(() => voltarAoCodigo(qtdCampo), 60);
         setTimeout(() => {
           if (lerQtd() !== alvo) preencher(qtdCampo, alvo);        // reaplica se foi sobrescrito
+          preencherPrevisao();                                    // reaplica se o IDS recalculou a previsão
           voltarAoCodigo(qtdCampo);
         }, CONFERE_MS);
       } catch (erro) {
