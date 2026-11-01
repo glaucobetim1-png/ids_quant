@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.6.4
+// @version      1.6.5
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -124,7 +124,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.6.3 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.6.4 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -377,6 +377,7 @@
   //  false = escreve a data direto na PREVISÃO (Suficiência fica vazia/0).
   const USAR_DOSE_DIARIA = true;
   const RE_DOSE_DIARIA = /^Dose Di.ria:?$/i;
+  let ultimaDose = { ins: null, qtd: null };   // controla pra não reaplicar a dose em loop
   // OBS: o IDS calcula a Suficiência sozinho pela Dose Diária e força 0 quando ela está vazia.
   // Se o script escrever 15 aqui, o IDS zera na hora -> fica "piscando". Por isso vem DESLIGADO.
   const PREENCHER_SUFICIENCIA = false;   // true tenta preencher a Suficiência (causa piscar; o IDS reseta pra 0)
@@ -416,10 +417,23 @@
       if (!q) return;                                          // sem quantidade ainda: espera a próxima passada
       const dose = q / dias;                                   // Suficiência = Qtd / Dose = dias
       const atualDose = parseFloat(String(campoDose.value || "").replace(",", ".")) || 0;
-      if (Math.abs(atualDose - dose) < 1e-6) return;           // já está com a dose certa
+      // só aplica uma vez por (item + quantidade); se o campo já tem valor e nada mudou, não repete (evita loop)
+      if (ultimaDose.ins === ins && ultimaDose.qtd === q && atualDose > 0) return;
       const cmpD = window.Ext && Ext.getCmp(campoDose.dataset.componentid);
       if (cmpD && cmpD.setValue) { cmpD.setValue(dose); if (cmpD.checkChange) cmpD.checkChange(); }
       else preencher(campoDose, dose);
+      // o IDS só recalcula Suficiência/Previsão quando se SAI do campo: simula "clicar dentro e fora"
+      try {
+        campoDose.focus();
+        campoDose.dispatchEvent(new Event("input", { bubbles: true }));
+        campoDose.dispatchEvent(new Event("change", { bubbles: true }));
+        if (cmpD && cmpD.fireEvent) { cmpD.fireEvent("change", cmpD, dose); cmpD.fireEvent("blur", cmpD); }
+        campoDose.blur();
+        campoDose.dispatchEvent(new Event("blur", { bubbles: true }));
+        campoDose.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      } catch (e) { /* ignora */ }
+      ultimaDose = { ins: ins, qtd: q };
+      setTimeout(focarCodigo, 50);                             // devolve o foco ao campo do código
       console.log("[IDS-qtd] Dose Diária preenchida:", dose, "(p/", dias, "dias) | qtd", q, "| insumo", ins,
                   "-> o IDS deve calcular Suficiência =", dias);
       return;
