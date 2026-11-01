@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.6.3
+// @version      1.6.4
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -124,7 +124,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.6.2 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.6.3 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -371,6 +371,12 @@
   const FORCAR_PREVISAO = true;          // true = sempre põe hoje+N (sobrescreve) | false = só se estiver vazio
   const PREVISAO_DIAS_PADRAO = 15;
   const RE_PREVISAO = /^Previs.o:?$/i;   // campo "Previsão:" no formulário do item
+  // MODO: como garantir os 15 dias.
+  //  true  = preenche a DOSE DIÁRIA com (Quantidade / dias). O IDS então calcula sozinho a Suficiência (=dias)
+  //          e a Previsão. Mostra a Suficiência, sem piscar. (depende do campo aceitar casas decimais)
+  //  false = escreve a data direto na PREVISÃO (Suficiência fica vazia/0).
+  const USAR_DOSE_DIARIA = true;
+  const RE_DOSE_DIARIA = /^Dose Di.ria:?$/i;
   // OBS: o IDS calcula a Suficiência sozinho pela Dose Diária e força 0 quando ela está vazia.
   // Se o script escrever 15 aqui, o IDS zera na hora -> fica "piscando". Por isso vem DESLIGADO.
   const PREENCHER_SUFICIENCIA = false;   // true tenta preencher a Suficiência (causa piscar; o IDS reseta pra 0)
@@ -395,14 +401,33 @@
     return String(d.getDate()).padStart(2, "0") + "/" + String(d.getMonth() + 1).padStart(2, "0") + "/" + d.getFullYear();
   }
 
-  // Preenche a Previsão com hoje + N dias, só para insumos listados em "previsao_dias" (xaropes/gotas).
+  // Garante os N dias de previsão, só para insumos listados em "previsao_dias" (xaropes/gotas).
   function preencherPrevisao() {
     if (!PREENCHER_PREVISAO || !listaPrevisaoDefinida) return;
     const ins = codigoInsumoDaTela();
     if (!ins || PREVISAO_DIAS[ins] === undefined) return;      // item não está na lista
+    const dias = PREVISAO_DIAS[ins] || PREVISAO_DIAS_PADRAO;
+
+    // MODO DOSE DIÁRIA: escreve Dose = Quantidade / dias e deixa o IDS calcular Suficiência e Previsão.
+    if (USAR_DOSE_DIARIA) {
+      const campoDose = campoPorRotulo(RE_DOSE_DIARIA);
+      if (!campoDose) { console.warn("[IDS-qtd] Dose Diária: campo não encontrado na tela (confira o rótulo do campo)"); return; }
+      const q = lerQtd();
+      if (!q) return;                                          // sem quantidade ainda: espera a próxima passada
+      const dose = q / dias;                                   // Suficiência = Qtd / Dose = dias
+      const atualDose = parseFloat(String(campoDose.value || "").replace(",", ".")) || 0;
+      if (Math.abs(atualDose - dose) < 1e-6) return;           // já está com a dose certa
+      const cmpD = window.Ext && Ext.getCmp(campoDose.dataset.componentid);
+      if (cmpD && cmpD.setValue) { cmpD.setValue(dose); if (cmpD.checkChange) cmpD.checkChange(); }
+      else preencher(campoDose, dose);
+      console.log("[IDS-qtd] Dose Diária preenchida:", dose, "(p/", dias, "dias) | qtd", q, "| insumo", ins,
+                  "-> o IDS deve calcular Suficiência =", dias);
+      return;
+    }
+
+    // MODO PREVISÃO DIRETA: escreve a data em Previsão.
     const campo = campoPorRotulo(RE_PREVISAO);
     if (!campo) { console.warn("[IDS-qtd] Previsão: campo não encontrado na tela (confira o rótulo do campo)"); return; }
-    const dias = PREVISAO_DIAS[ins] || PREVISAO_DIAS_PADRAO;
     const alvo = dataMaisDiasBR(dias);
     const atual = (campo.value || "").trim();
     if (!FORCAR_PREVISAO && atual) return;                     // já tem data e não é pra sobrescrever
