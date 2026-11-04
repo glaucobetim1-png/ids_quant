@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IDS - Quantidade automática ao bipar
 // @namespace    ids-bariri-quantidade
-// @version      1.6.5
+// @version      1.7.3
 // @description  Preenche a quantidade ao bipar o código de barras no IDS Saúde (caixa e avulso) + calculadora na transferência. Tabelas lidas do tabelas.json no GitHub.
 // @match        https://bariri-saude.ids.inf.br/*
 // @grant        none
@@ -13,7 +13,7 @@
   // ===== Tabelas (C.B. -> quantidade) vêm do tabelas.json no GitHub =====
   // Para adicionar/alterar um C.B., edite só o tabelas.json: não precisa mexer neste script nem na versão.
   const TABELAS_URL = "https://raw.githubusercontent.com/glaucobetim1-png/ids_quant/refs/heads/main/tabelas.json";
-  const TABELAS_RECARREGAR_MIN = 30;                 // releitura periódica com a página aberta (0 = só ao carregar)
+  const TABELAS_RECARREGAR_MIN = 5;                 // releitura periódica com a página aberta (0 = só ao carregar)
   const TABELAS_CACHE_KEY = "ids-qtd-tabelas-v1";    // cópia local, usada se o GitHub estiver fora do ar
 
   const TABELA = {};   // etiqueta de caixa: C.B. -> quantidade por embalagem  (chave "caixa" do JSON)
@@ -22,6 +22,8 @@
   let listaControladosDefinida = false;   // false = o JSON ainda não tem a chave "controlados"
   const PREVISAO_DIAS = {}; // CÓDIGOS DE INSUMO -> dias p/ próxima retirada (xaropes/gotas etc.)  chave "previsao_dias" do JSON
   let listaPrevisaoDefinida = false;      // false = o JSON ainda não tem a chave "previsao_dias"
+  const NUMERO_RECEITA = {};// CÓDIGOS DE INSUMO -> número da receita padrão (ex.: "1")  chave "numero_receita" do JSON
+  let listaNumeroReceitaDefinida = false; // false = o JSON ainda não tem a chave "numero_receita"
   let tabelasOrigem = "nenhuma";
 
   function aplicarTabelas(d) {
@@ -29,12 +31,15 @@
     for (const k of Object.keys(AVULSO)) delete AVULSO[k];
     for (const k of Object.keys(CONTROLADOS)) delete CONTROLADOS[k];
     for (const k of Object.keys(PREVISAO_DIAS)) delete PREVISAO_DIAS[k];
+    for (const k of Object.keys(NUMERO_RECEITA)) delete NUMERO_RECEITA[k];
     Object.assign(TABELA, d.caixa);
     Object.assign(AVULSO, d.avulso);
     Object.assign(CONTROLADOS, d.controlados || {});
     Object.assign(PREVISAO_DIAS, d.previsao || {});
+    Object.assign(NUMERO_RECEITA, d.numeroReceita || {});
     listaControladosDefinida = !!d.temLista;
     listaPrevisaoDefinida = !!d.temPrevisao;
+    listaNumeroReceitaDefinida = !!d.temNumeroReceita;
   }
 
   // confere o formato; devolve {caixa, avulso} limpo ou null se o conteúdo não servir
@@ -64,7 +69,20 @@
     const temPrevisao = typeof obj.temPrevisao === "boolean" ? obj.temPrevisao
                                                              : (!!pv && typeof pv === "object");
     const previsao = limpar(pv, "previsao_dias");       // dias positivos (ex.: 15)
-    return { caixa, avulso, controlados, temLista, previsao, temPrevisao };
+    // numero_receita: aceita [1234, 5678] (todos "1") ou {"1234": "1", "5678": "2"}
+    // (do JSON vem como "numero_receita"; da cópia local/cache vem já validado como "numeroReceita")
+    let nr = obj.numero_receita !== undefined ? obj.numero_receita : obj.numeroReceita;
+    if (Array.isArray(nr)) nr = Object.fromEntries(nr.map(c => [String(c).trim(), "1"]));
+    const temNumeroReceita = typeof obj.temNumeroReceita === "boolean" ? obj.temNumeroReceita
+                                                                       : (!!nr && typeof nr === "object");
+    const numeroReceita = {};
+    if (nr && typeof nr === "object") {
+      for (const [k, v] of Object.entries(nr)) {
+        const val = String(v).trim();
+        if (val) numeroReceita[String(k).trim()] = val;   // texto (o campo aceita qualquer coisa; padrão "1")
+      }
+    }
+    return { caixa, avulso, controlados, temLista, previsao, temPrevisao, numeroReceita, temNumeroReceita };
   }
 
   // aceita comentários (// ...) e vírgula sobrando antes de } ou ]
@@ -100,7 +118,8 @@
       console.log("[IDS-qtd] tabelas atualizadas do GitHub | caixa:", Object.keys(TABELA).length,
                   "| avulsos especiais:", Object.keys(AVULSO).length,
                   "| controlados:", listaControladosDefinida ? Object.keys(CONTROLADOS).length : "sem lista (data para todos)",
-                  "| previsão (xaropes/gotas):", listaPrevisaoDefinida ? Object.keys(PREVISAO_DIAS).length : "sem lista");
+                  "| previsão (xaropes/gotas):", listaPrevisaoDefinida ? Object.keys(PREVISAO_DIAS).length : "sem lista",
+                  "| nº receita:", listaNumeroReceitaDefinida ? Object.keys(NUMERO_RECEITA).length : "sem lista");
     } catch (e) {
       console.warn("[IDS-qtd] não consegui ler o tabelas.json (" + (e && e.message ? e.message : e) +
                    "). Mantendo as tabelas de:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length);
@@ -115,8 +134,16 @@
 
   const INTERVALO_MS = 30;          // frequência de checagem
   const MIN_MESMO_ITEM_MS = 250;    // espera mínima ao bipar o mesmo item de novo
-  const LIMITE_MS = 3000;           // desiste depois disso
+  const LIMITE_MS = 8000;           // desiste depois disso (aumentado: PCs lentos demoravam mais que 3s p/ carregar o item)
   const CONFERE_MS = 400;           // reconfere se o IDS não sobrescreveu
+
+  // ===== Rede de segurança: recupera sozinho quando o item carrega mas a quantidade não entra =====
+  // (resolve o "bipa, puxa a info, mas não preenche; só F5 resolve" sem precisar de F5 nem F12)
+  const AUTO_RECUPERAR = true;
+  const RECUPERAR_APOS_MS = 2500;   // tempo com item carregado + quantidade vazia antes de preencher sozinho
+  let ultimoCodigoBipado = { codigo: "", t: 0 };   // último código visto no campo ao dar Enter (p/ acertar caixa/avulso)
+  let travadoDesde = 0;             // desde quando está "item carregado + quantidade vazia"
+  let loteRecuperado = "";          // último lote já recuperado (não repete no mesmo item)
   const VOLTAR_AO_CODIGO_NA_SAIDA = false;  // true = também volta ao código na saída
   const EXIGIR_CAMPO_LIMPO = true;  // ao bipar o MESMO item de novo, só soma depois que o IDS limpar o campo do código
 
@@ -124,7 +151,7 @@
   const QTD_AVULSO = 1;             // quantidade por bipada de etiqueta avulsa que não esteja na AVULSO
   const ehEtiquetaAvulsa = (codigo) => /^(0|999)\d+$/.test(codigo);
 
-  console.log("[IDS-qtd] script carregado v1.6.4 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
+  console.log("[IDS-qtd] script carregado v1.7.3 |", (window === window.top ? "JANELA PRINCIPAL" : "IFRAME"), location.pathname,
               "| tabelas:", tabelasOrigem, "| caixa:", Object.keys(TABELA).length,
               "| avulsos especiais:", Object.keys(AVULSO).length);
 
@@ -147,6 +174,18 @@
 
   function campoPorRotulo(regex) {
     const rotulo = [...document.querySelectorAll("label")]
+      .filter(l => l.offsetParent !== null)
+      .find(l => regex.test(l.textContent.trim().replace(/\s+/g, " ")));
+    return rotulo ? document.getElementById(rotulo.getAttribute("for")) : null;
+  }
+
+  // igual ao campoPorRotulo, mas procura SÓ dentro da janela do item (onde está a Quantidade).
+  // Necessário quando o mesmo rótulo existe no formulário de fora e no do item (ex.: "Número da Receita:").
+  function campoPorRotuloNoItem(regex) {
+    const q = campoPorRotulo(RE_QTD);
+    const janela = q ? q.closest(".x-window") : null;
+    const raiz = janela || document;
+    const rotulo = [...raiz.querySelectorAll("label")]
       .filter(l => l.offsetParent !== null)
       .find(l => regex.test(l.textContent.trim().replace(/\s+/g, " ")));
     return rotulo ? document.getElementById(rotulo.getAttribute("for")) : null;
@@ -365,6 +404,13 @@
   const RE_DATA_RECEITA = /^Data da Receita:$/;
   const RE_INSUMO = /^Insumo:$/;
 
+  // ===== Número da Receita: preenche com "1" (padrão) só para os insumos listados em "numero_receita" =====
+  // Para medicamentos cuja receita não traz número (ex.: TRAMADOL, PARACETAMOL+CODEÍNA) e o IDS exige o campo.
+  // Nunca sobrescreve um número já digitado.
+  const PREENCHER_NUMERO_RECEITA = true;      // false desliga
+  const NUMERO_RECEITA_PADRAO = "1";          // valor quando a lista vem como [codigos]
+  const RE_NUM_RECEITA = /^N.mero da Receita:$/i;
+
   // ===== Previsão de próxima retirada (xaropes, gotas etc.): preenche com HOJE + N dias =====
   // Só para os insumos listados em "previsao_dias" no tabelas.json (padrão 15 dias).
   const PREENCHER_PREVISAO = true;       // false desliga
@@ -375,7 +421,9 @@
   //  true  = preenche a DOSE DIÁRIA com (Quantidade / dias). O IDS então calcula sozinho a Suficiência (=dias)
   //          e a Previsão. Mostra a Suficiência, sem piscar. (depende do campo aceitar casas decimais)
   //  false = escreve a data direto na PREVISÃO (Suficiência fica vazia/0).
-  const USAR_DOSE_DIARIA = true;
+  // DESLIGADO: o modo Dose Diária (foca/desfoca o campo) estava TRAVANDO a janela do item
+  // (botão Fechar parava de responder). Modo Previsão direta é estável.
+  const USAR_DOSE_DIARIA = false;
   const RE_DOSE_DIARIA = /^Dose Di.ria:?$/i;
   let ultimaDose = { ins: null, qtd: null };   // controla pra não reaplicar a dose em loop
   // OBS: o IDS calcula a Suficiência sozinho pela Dose Diária e força 0 quando ela está vazia.
@@ -490,6 +538,21 @@
     console.log("[IDS-qtd] Data da Receita preenchida:", campo.value || dataHojeBR());
   }
 
+  // Preenche o Número da Receita com "1" (padrão), só para os insumos listados em "numero_receita".
+  function preencherNumeroReceita() {
+    if (!PREENCHER_NUMERO_RECEITA || !listaNumeroReceitaDefinida) return;
+    const ins = codigoInsumoDaTela();
+    if (!ins || NUMERO_RECEITA[ins] === undefined) return;      // item não está na lista
+    // procura DENTRO da janela do item: existe outro "Número da Receita" no formulário de fora
+    const campo = campoPorRotuloNoItem(RE_NUM_RECEITA);
+    if (!campo || (campo.value || "").trim()) return;           // não existe ou já tem número: não mexe
+    const valor = NUMERO_RECEITA[ins] || NUMERO_RECEITA_PADRAO;
+    const cmp = window.Ext && Ext.getCmp(campo.dataset.componentid);
+    if (cmp && cmp.setValue) { cmp.setValue(valor); if (cmp.checkChange) cmp.checkChange(); }
+    else preencher(campo, valor);
+    console.log("[IDS-qtd] Número da Receita preenchido:", valor, "| insumo", ins);
+  }
+
   // pinta o campo de amarelo para lembrar que a data foi posta pelo script (confira se a receita é de hoje)
   function destacarDataReceita(campo) {
     if (!DESTACAR_DATA_RECEITA || !campo) return;
@@ -531,6 +594,9 @@
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     const cod = campoPorRotulo(RE_COD);
+    // registra o código SEMPRE que houver Enter com o campo do código preenchido,
+    // mesmo que o resto do handler não rode: a rede de segurança usa isso p/ acertar caixa/avulso
+    if (cod && (cod.value || "").trim()) ultimoCodigoBipado = { codigo: cod.value.trim(), t: Date.now() };
     if (!cod || e.target !== cod || !cod.value) {
       // diagnóstico: Enter num campo com cara de código de barras, mas o script não achou o campo do código
       const alvo = e.target;
@@ -570,6 +636,7 @@
         preencher(qtdCampoDireto, alvoDireto);
         console.log("[IDS-qtd] soma direta (sem passar pelo IDS):", antes.qtd, "+", unid, "=", alvoDireto);
         preencherPrevisao();                                   // xaropes/gotas: Previsão = hoje + N dias
+        preencherNumeroReceita();                              // nº da receita "1" p/ os listados
         mostrarAviso((avulso ? "AVULSO" : "CAIXA") + ": +" + unid, avulso);
         setTimeout(() => {
           const q2 = campoPorRotulo(RE_QTD);
@@ -614,6 +681,8 @@
         clearInterval(t);
         preencherDataReceita();                              // saída: data de hoje se estiver vazia
         setTimeout(preencherDataReceita, CONFERE_MS);        // reaplica se o IDS limpou o campo
+        preencherNumeroReceita();                            // nº da receita "1" p/ os listados (TRAMADOL etc.)
+        setTimeout(preencherNumeroReceita, CONFERE_MS);
 
         const m = textoLote.match(/C\.B\.:\s*(\S+)/);
         const cbLote = m ? m[1] : null;                // C.B. do lote mostrado pelo IDS
@@ -662,7 +731,10 @@
   const AUTO_FECHAR_HISTORICO  = false;  // true = fecha QUALQUER histórico (inclusive a do item) | tem prioridade
   // true = esconde a janela no instante em que ela surge, então a geral nem chega a aparecer (fecha "por trás").
   // false = deixa a geral aparecer e só então fecha (fica visível por HIST_ESPERA_MS antes de sumir).
-  const EVITAR_ABRIR_HISTORICO = true;
+  // DESLIGADO: esconder máscaras de forma ampla estava interferindo em outras máscaras do IDS
+  // (ex.: o "Aguarde" que travava até dar F5). Com false, o script NÃO mexe em máscara nenhuma
+  // (o Ext fecha a janela e remove a máscara dela sozinho). A geral só dá uma piscadinha antes de sumir.
+  const EVITAR_ABRIR_HISTORICO = false;
   // tempo (ms) de segurança com o Insumo vazio antes de concluir que é a geral e fechar.
   // Com EVITAR_ABRIR ligado a janela já está escondida nesse meio-tempo, então isso é invisível.
   // Serve de margem pra NUNCA fechar a do item (que preenche o Insumo em ~150ms).
@@ -676,8 +748,9 @@
 
   function janelaHistorico() {
     // acha a janela mesmo que esteja escondida com visibility:hidden (offsetParent continua != null)
+    // IGNORA a janela aberta pelo botão (idsManual): essa é intocável, o IDS cuida dela.
     return [...document.querySelectorAll(".x-window")].find(w =>
-      w.offsetParent !== null && ehJanelaHist(w));
+      w.offsetParent !== null && ehJanelaHist(w) && w.dataset.idsManual !== "1");
   }
 
   // lê o valor do campo "Insumo:" DENTRO da janela de histórico (string vazia = janela geral / ainda carregando)
@@ -758,7 +831,17 @@
       const btn = e.target.closest && e.target.closest(".x-btn, button, a");
       if (btn && RE_BTN_HIST.test((btn.textContent || "").trim().replace(/\s+/g, " "))) {
         histPedidaManual = Date.now();
-        console.log("[IDS-qtd] botão Histórico clicado: a próxima janela será mantida aberta");
+        // LIMPEZA: fecha qualquer histórico automático que esteja escondido/pendente e restaura máscaras.
+        // É isso que evita a máscara presa (= sistema travado) quando o automático e o manual se cruzam.
+        [...document.querySelectorAll(".x-window")].forEach((w) => {
+          if (ehJanelaHist(w) && w.dataset.idsManual !== "1") {
+            w.style.removeProperty("visibility");
+            fecharHistorico(w);
+          }
+        });
+        restaurarMascaras();
+        histClicada = false; histVazioDesde = 0; histAberta = false;
+        console.log("[IDS-qtd] botão Histórico clicado: limpei o automático e vou manter a janela manual aberta");
       }
     } catch (e2) { /* ignora */ }
   }, true);
@@ -766,16 +849,20 @@
   // decide o destino da janela de histórico: geral -> fecha (escondida); item -> mostra e deixa aberta
   function tratarJanelaHist(w) {
     if (!w || histClicada) return;
+    if (w.dataset.idsManual === "1") return;   // janela de consulta manual: intocável (o IDS cuida dela)
     histAberta = true;
     const insumo = insumoDoHistorico(w);
     const vazio = insumo === "";
 
-    // Você abriu pelo botão "Histórico": mantém aberta, mesmo sendo a geral (Insumo vazio).
+    // Você abriu pelo botão "Histórico": marca como MANUAL e nunca mais mexe (o IDS cuida da máscara/Sair).
     if ((Date.now() - histPedidaManual) < JANELA_MANUAL_MS) {
+      w.dataset.idsManual = "1";
       revelarHistEmascara(w);
-      histClicada = true;
+      histClicada = false;    // não prende o estado global na janela manual (ela é independente)
+      histVazioDesde = 0;
+      histAberta = false;
       histPedidaManual = 0;   // consome: não vale para uma próxima janela
-      console.log("[IDS-qtd] histórico aberto pelo botão: mantendo aberto");
+      console.log("[IDS-qtd] histórico aberto pelo botão: marcado como manual (intocável)");
       return;
     }
 
@@ -813,6 +900,7 @@
           if (n.nodeType !== 1) continue;
           let w = ehJanelaHist(n) ? n : (n.querySelector ? [...n.querySelectorAll(".x-window")].find(ehJanelaHist) : null);
           if (!w) continue;
+          if (w.dataset.idsManual === "1") continue;   // janela manual: não encosta
           // esconde JÁ (janela + máscara escura) se o Insumo ainda estiver vazio, pra geral não chegar a aparecer
           // (mas NÃO esconde se você acabou de clicar no botão Histórico: aí é consulta proposital)
           const pedidaManual = (Date.now() - histPedidaManual) < JANELA_MANUAL_MS;
@@ -844,4 +932,71 @@
       }
     } catch (e) { console.error("[IDS-qtd] erro histórico:", e); }
   }, 120);
+
+  // ===== Rede de segurança: item carregado + quantidade vazia por um tempo -> preenche sozinho =====
+  // Só age quando o fluxo normal NÃO preencheu (evita o F5). Usa o código realmente bipado,
+  // então acerta caixa/avulso igual ao normal. Nunca mexe em item já com quantidade (não atrapalha a soma).
+  setInterval(() => {
+    if (!AUTO_RECUPERAR) return;
+    try {
+      if (campoPorRotulo(RE_QTD_REQ)) { travadoDesde = 0; return; }   // transferência: tem a calculadora, não mexe
+      const qtdCampo = campoPorRotulo(RE_QTD);
+      const lote = campoPorRotulo(RE_LOTE);
+      const cod = campoPorRotulo(RE_COD);
+      if (!qtdCampo || !lote) { travadoDesde = 0; return; }
+      const textoLote = lote.value || "";
+      const codVal = cod ? (cod.value || "").trim() : "";
+      const qtd = lerQtd();
+
+      if (!textoLote) loteRecuperado = "";   // formulário sem item: libera recuperar o próximo
+
+      // "travado" = item carregado (Lote preenchido), quantidade vazia, campo do código já limpo,
+      // e ainda não recuperamos esse mesmo lote
+      const travado = textoLote && !qtd && !codVal && textoLote !== loteRecuperado;
+      if (!travado) { travadoDesde = 0; return; }
+
+      if (!travadoDesde) { travadoDesde = Date.now(); return; }
+      if (Date.now() - travadoDesde < RECUPERAR_APOS_MS) return;
+
+      // só recupera com o código realmente bipado há pouco (acerta caixa/avulso; sem isso, não arrisca)
+      const recente = ultimoCodigoBipado.codigo && (Date.now() - ultimoCodigoBipado.t) < 20000;
+      if (!recente) { travadoDesde = 0; return; }
+
+      const m = textoLote.match(/C\.B\.:\s*(\S+)/);
+      const cbLote = m ? m[1] : null;
+      const unidade = unidadeDoCodigo(ultimoCodigoBipado.codigo, cbLote);
+      if (unidade === undefined) { travadoDesde = 0; return; }   // não está na tabela: não preenche
+
+      preencher(qtdCampo, unidade);
+      loteRecuperado = textoLote;
+      travadoDesde = 0;
+      preencherPrevisao();   // xaropes/gotas: mantém a previsão também na recuperação
+      preencherNumeroReceita();   // nº da receita "1" p/ os listados, também na recuperação
+      console.log("[IDS-qtd] RECUPERAÇÃO automática: quantidade preenchida sem F5 | código:", ultimoCodigoBipado.codigo,
+                  "| C.B. do lote:", cbLote, "| quantidade:", unidade);
+      setTimeout(() => { if (lerQtd() !== unidade) preencher(qtdCampo, unidade); }, CONFERE_MS);
+    } catch (e) { /* ignora */ }
+  }, 500);
+
+  // ===== Avisos "igrowl" (notificações verdes de sucesso) que empilham no canto e cobrem os ícones =====
+  // Só mexe nos elementos .igrowl (as notificaçõezinhas). NÃO toca em janelas .x-window de verdade.
+  const SUPRIMIR_AVISOS = true;
+  const AVISO_VIDA_MS = 1200;      // tempo na tela antes do script tirar (piscadinha p/ você ver o "sucesso")
+  setInterval(() => {
+    if (!SUPRIMIR_AVISOS) return;
+    try {
+      const caixas = [...document.querySelectorAll(".igrowl")].filter(a => a.offsetParent !== null);
+      if (!caixas.length) return;
+      const agora = Date.now();
+      caixas.forEach(a => { if (!a.dataset.idsVisto) a.dataset.idsVisto = String(agora); });
+      const maisNovo = caixas[caixas.length - 1];
+      caixas.forEach(a => {
+        const idade = agora - Number(a.dataset.idsVisto);
+        // tira os antigos quando empilham (mantém só o mais novo) e qualquer um após a vida curta
+        if ((caixas.length > 1 && a !== maisNovo) || idade >= AVISO_VIDA_MS) {
+          try { a.remove(); } catch (e) { /* ignora */ }
+        }
+      });
+    } catch (e) { /* ignora */ }
+  }, 250);
 })();
